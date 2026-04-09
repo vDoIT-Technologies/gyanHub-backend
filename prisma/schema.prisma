@@ -1,0 +1,210 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+// generator client {
+//   provider = "prisma-client-js"
+// }
+
+// datasource db {
+//   provider = "postgresql"
+//   url      = env("DATABASE_URL")
+// }
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Wallet {
+  id        String   @id @default(uuid())
+  address   String   @unique
+  metadata  Json?
+  user      User?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String?    @unique
+  name         String
+  password     String?
+  about        String?
+  profilePhoto String?
+  type         String     @default("wallet")
+  wallet       Wallet     @relation(fields: [walletId], references: [id])
+  walletId     String     @unique
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  documents    Document[]
+}
+
+model Admin {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  password     String
+  permissions  Json?
+  role         String?
+  profilePhoto String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model AvatarTeacher {
+  id             String   @id @default(uuid())
+  name           String
+  description    String?
+  imageUrl       String?
+  personalityId  String? // External persona service ID
+  category       String?
+  presenterId    String? // D-ID presenter_id (clips service)
+  sourceUrl      String? // D-ID source_url (talks service)
+  service        String   @default("clips")
+  voiceId        String? // ElevenLabs voice_id
+  systemPrompt   String?
+  topics         String[]
+  knowledgeFiles Json? // Stores list of files { name, fileId, etc. }
+  knowledgeText  String?  @db.Text
+  points         Int      @default(0)
+  isActive       Boolean  @default(true)
+  isVisible      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model Test {
+  id         String     @id @default(uuid())
+  title      String
+  difficulty Difficulty @default(Easy)
+  createdAt  DateTime   @default(now()) @map("created_at")
+  questions  Question[]
+
+  @@map("tests")
+}
+
+model Question {
+  id          String   @id @default(uuid())
+  question    String
+  explanation String
+  testId      String   @map("test_id")
+  test        Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
+  options     Option[]
+
+  @@map("questions")
+}
+
+model Option {
+  id         String   @id @default(uuid())
+  text       String
+  isCorrect  Boolean  @default(false) @map("is_correct")
+  questionId String   @map("question_id")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@map("options")
+}
+
+// ─────────────────────────────────────────────
+// Course & Slides
+// ─────────────────────────────────────────────
+
+model Course {
+  id        String   @id @default(uuid())
+  title     String
+  createdAt DateTime @default(now()) @map("created_at")
+  slides    Slide[]
+
+  @@map("courses")
+}
+
+model Slide {
+  id          String  @id @default(uuid())
+  title       String
+  content     String
+  audioBase64 String?
+  imageUrls   String[] @default([])
+  courseId    String  @map("course_id")
+  course      Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@map("slides")
+}
+
+model ImageLibrary {
+  id          String   @id @default(uuid())
+  url         String
+  description String   // Used by AI to match relevance
+  tags        String[]
+  embedding   Unsupported("vector(1536)")?
+  createdAt   DateTime @default(now())
+
+  @@map("image_library")
+}
+
+// ─────────────────────────────────────────────
+// User Documents (RAG / pgvector)
+// ─────────────────────────────────────────────
+
+model Document {
+  id           String         @id @default(uuid())
+  ownerId      String?        @map("owner_id")
+  owner        User?          @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  title        String
+  sourceType   DocumentSource @map("source_type")
+  mimeType     String?        @map("mime_type")
+  originalName String?        @map("original_name")
+  storageUrl   String?        @map("storage_url")
+  status       DocumentStatus @default(PENDING)
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  chunks DocumentChunk[]
+
+  @@index([ownerId])
+  @@map("documents")
+}
+
+model DocumentChunk {
+  id         String                       @id @default(uuid())
+  documentId String                       @map("document_id")
+  document   Document                     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex Int                          @map("chunk_index")
+  content    String                       @db.Text
+  metadata   Json?
+  embedding  Unsupported("vector(1536)")?
+  createdAt  DateTime                     @default(now()) @map("created_at")
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+  @@map("document_chunks")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Difficulty {
+  Easy
+  Medium
+  Hard
+}
+
+enum DocumentSource {
+  TEXT
+  PDF
+  DOCX
+  IMAGE
+  URL
+}
+
+enum DocumentStatus {
+  PENDING
+  READY
+  FAILED
+}
