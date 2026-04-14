@@ -9,7 +9,7 @@ function normalizeBool(v) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(v.toLowerCase());
 }
 
-// POST /documents — upload a document (multipart) or ingest plain text (json)
+// POST /documents — upload a document (multipart) or ingest plain text (json or multipart)
 app.post('/', async (c) => {
   const contentType = (c.req.header('content-type') || '').toLowerCase();
 
@@ -30,24 +30,46 @@ app.post('/', async (c) => {
     return c.json(res, 201);
   }
 
-  // Multipart file ingestion
+  // Multipart file or text ingestion
   const form = await c.req.formData();
-  const file = form.get('file');
-  if (!(file instanceof File)) {
-    return c.json({ error: 'file is required (multipart/form-data field name: "file")' }, 400);
-  }
+  const file = form.get('file') ?? form.get('files');
+  const text = form.get('text');
 
   const ownerId = form.get('ownerId') ?? form.get('owner_id');
   const title = form.get('title');
   const generateEmbeddings = form.get('generate_embeddings') ?? form.get('generateEmbeddings');
 
-  const res = await ingestDocumentFromFile({
-    file,
-    ownerId: typeof ownerId === 'string' && ownerId.trim() ? ownerId.trim() : null,
-    title: typeof title === 'string' ? title : '',
-    generateEmbeddings: normalizeBool(generateEmbeddings),
-  });
-  return c.json(res, 201);
+  const normalizedOwnerId = typeof ownerId === 'string' && ownerId.trim() ? ownerId.trim() : null;
+  const normalizedTitle = typeof title === 'string' ? title : '';
+  const normalizedGenerateEmbeddings = normalizeBool(generateEmbeddings);
+
+  if (file instanceof File) {
+    const res = await ingestDocumentFromFile({
+      file,
+      ownerId: normalizedOwnerId,
+      title: normalizedTitle,
+      generateEmbeddings: normalizedGenerateEmbeddings,
+    });
+    return c.json(res, 201);
+  }
+
+  if (typeof text === 'string' && text.trim()) {
+    const res = await ingestDocumentFromText({
+      text,
+      ownerId: normalizedOwnerId,
+      title: normalizedTitle || 'Untitled document',
+      generateEmbeddings: normalizedGenerateEmbeddings,
+    });
+    return c.json(res, 201);
+  }
+
+  return c.json(
+    {
+      error:
+        'Either file (multipart/form-data field "file" or "files") or text (field "text") is required.',
+    },
+    400
+  );
 });
 
 // GET /documents/:id — fetch document + chunks

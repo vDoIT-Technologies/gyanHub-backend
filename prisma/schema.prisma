@@ -119,8 +119,10 @@ model Course {
   id        String   @id @default(uuid())
   title     String
   createdAt DateTime @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
   slides    Slide[]
 
+  @@index([deletedAt])
   @@map("courses")
 }
 
