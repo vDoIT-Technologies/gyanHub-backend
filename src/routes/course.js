@@ -3,6 +3,7 @@ import {
   generateCourse,
   fetchCourse,
   fetchAllCoursesMetadata,
+  deleteCourseById,
 } from '../services/courseService.js';
 
 const app = new Hono();
@@ -30,18 +31,41 @@ app.get('/all', async (c) => {
 
 // POST /courses/ — generate a new course
 app.post('/', async (c) => {
-  const { topic, num_slides = 5, teacherId } = await c.req.json();
+  const { topic, num_slides = 5, teacherId, document_id, documentId } = await c.req.json();
 
   if (!topic) {
     return c.json({ error: 'topic is required' }, 400);
   }
 
-  const courseId = await generateCourse(topic, Number(num_slides), teacherId);
+  const selectedDocumentId =
+    typeof document_id === 'string' && document_id.trim()
+      ? document_id.trim()
+      : (typeof documentId === 'string' && documentId.trim() ? documentId.trim() : null);
+
+  const courseId = await generateCourse(topic, Number(num_slides), teacherId, selectedDocumentId);
   if (!courseId) {
     return c.json({ error: 'Failed to generate course' }, 500);
   }
 
   return c.json({ course_id: courseId }, 201);
+});
+
+// DELETE /courses/:id — delete a course and all associated slides
+app.delete('/:id', async (c) => {
+  const courseId = c.req.param('id');
+  if (!courseId) {
+    return c.json({ error: 'course id is required' }, 400);
+  }
+
+  const result = await deleteCourseById(courseId);
+  if (!result.success) {
+    if (result.notFound) {
+      return c.json({ error: result.error || 'Course not found' }, 404);
+    }
+    return c.json({ error: result.error || 'Failed to delete course' }, 500);
+  }
+
+  return c.json({ success: true, deleted_course_id: courseId, deleted_at: result.deletedAt || null }, 200);
 });
 
 export default app;

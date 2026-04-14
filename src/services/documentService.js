@@ -1,10 +1,19 @@
 import { Prisma } from '@prisma/client';
 import { OpenAI } from 'openai';
 import pdf from 'pdf-parse';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { ENV } from '../configs/constant.js';
 import prisma from '../lib/prisma.js';
 
 const openai = new OpenAI({ apiKey: ENV.OPENAI_API_KEY });
+
+const STOPWORDS = new Set([
+  'the','a','an','and','or','of','to','in','on','for','with','by','from','at','as','is','are',
+  'was','were','be','been','being','this','that','these','those','it','its','into','over','under',
+  'about','between','within','without','via','per','than','then','but','not','no','yes','you','your',
+  'we','our','they','their','he','she','his','her','them','us','i','me','my'
+]);
 
 function normalizeBool(v) {
   if (typeof v === 'boolean') return v;
@@ -45,12 +54,153 @@ function chunkText(text, { chunkSize = 2000, chunkOverlap = 200 } = {}) {
   return chunks;
 }
 
-async function extractTextFromFile(file, sourceType) {
+function sanitizeFilename(name) {
+  return String(name || 'document')
+    .replace(/[^a-zA-Z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 120) || 'document';
+}
+
+function normalizeText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenize(text) {
+  return normalizeText(text)
+    .split(' ')
+    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+}
+
+function buildShortDescription(pageText, index, pageNum = null) {
+  const cleaned = String(pageText || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return pageNum ? `Extracted document image from page ${pageNum}` : `Extracted document image ${index}`;
+  }
+
+  const words = cleaned.split(' ').slice(0, 22).join(' ');
+  return pageNum ? `Page ${pageNum} visual: ${words}` : `Document visual: ${words}`;
+}
+
+async function runCmd(cmd, args) {
+  try {
+    const proc = Bun.spawn([cmd, ...args], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    if (exitCode !== 0) {
+      return { ok: false, stdout, stderr, exitCode };
+    }
+
+    return { ok: true, stdout, stderr, exitCode };
+  } catch (err) {
+    return { ok: false, stdout: '', stderr: err?.message || 'Command execution failed', exitCode: -1 };
+  }
+}
+
+async function storeUploadedFile(documentId, originalName, buffer) {
+  const dir = path.join(process.cwd(), 'documents');
+  await fs.mkdir(dir, { recursive: true });
+
+  const base = sanitizeFilename(originalName);
+  const storedName = `${Date.now()}-${documentId}-${base}`;
+  const fullPath = path.join(dir, storedName);
+
+  await fs.writeFile(fullPath, buffer);
+  return fullPath;
+}
+
+function parsePdfImagesListOutput(stdout) {
+  const lines = String(stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const rows = [];
+
+  for (const line of lines) {
+    if (!/^\d+\s+\d+\s+/.test(line)) continue;
+    const parts = line.split(/\s+/);
+    const page = Number(parts[0]);
+    if (Number.isFinite(page)) {
+      rows.push({ page });
+    }
+  }
+
+  return rows;
+}
+
+async function getPdfPageText(pdfPath, pageNum) {
+  const result = await runCmd('pdftotext', ['-f', String(pageNum), '-l', String(pageNum), '-layout', pdfPath, '-']);
+  if (!result.ok) return '';
+  return String(result.stdout || '').trim();
+}
+
+async function extractPdfImages({ pdfPath, documentId, maxImages = 12 }) {
+  const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'document-images', documentId);
+  await fs.mkdir(uploadsDir, { recursive: true });
+
+  const listResult = await runCmd('pdfimages', ['-list', pdfPath]);
+  const pageRows = parsePdfImagesListOutput(listResult.stdout);
+
+  const extractPrefix = path.join(uploadsDir, 'img');
+  const extractResult = await runCmd('pdfimages', ['-all', pdfPath, extractPrefix]);
+  if (!extractResult.ok) {
+    console.error('[Document Ingest] pdfimages extraction failed:', extractResult.stderr || 'Unknown error');
+    return [];
+  }
+
+  const allFiles = await fs.readdir(uploadsDir);
+  const imageFiles = allFiles
+    .filter((name) => /^img-\d+\.(png|jpg|jpeg|webp)$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  if (imageFiles.length === 0) return [];
+
+  const pageTextCache = new Map();
+  const documentImages = [];
+
+  for (let i = 0; i < imageFiles.length && documentImages.length < maxImages; i++) {
+    const filename = imageFiles[i];
+    const row = pageRows[i] || null;
+    const pageNum = row?.page || null;
+
+    let pageText = '';
+    if (pageNum) {
+      if (pageTextCache.has(pageNum)) {
+        pageText = pageTextCache.get(pageNum);
+      } else {
+        pageText = await getPdfPageText(pdfPath, pageNum);
+        pageTextCache.set(pageNum, pageText);
+      }
+    }
+
+    const description = buildShortDescription(pageText, i + 1, pageNum);
+    const tags = tokenize(pageText).slice(0, 12);
+
+    documentImages.push({
+      source: 'DOCUMENT',
+      url: `/api/v1/uploads/document-images/${documentId}/${filename}`,
+      description,
+      tags,
+      page: pageNum,
+      file: filename,
+    });
+  }
+
+  return documentImages;
+}
+
+async function extractTextFromFileBuffer(buf, sourceType, file) {
   const filename = file?.name || 'document';
   const mimeType = file?.type || '';
-
-  const arrayBuffer = await file.arrayBuffer();
-  const buf = Buffer.from(arrayBuffer);
 
   if (sourceType === 'PDF') {
     const res = await pdf(buf);
@@ -136,8 +286,28 @@ export async function ingestDocumentFromFile({
   });
 
   try {
-    const extracted = await extractTextFromFile(file, sourceType);
+    const arrayBuffer = await file.arrayBuffer();
+    const fileBuffer = Buffer.from(arrayBuffer);
+    const storedPath = await storeUploadedFile(created.id, originalName, fileBuffer);
+
+    await prisma.document.update({
+      where: { id: created.id },
+      data: { storageUrl: storedPath },
+    });
+
+    const extracted = await extractTextFromFileBuffer(fileBuffer, sourceType, file);
     if (!extracted.ok) throw new Error(extracted.error || 'Failed to extract text');
+
+    let documentImages = [];
+    if (sourceType === 'PDF') {
+      documentImages = await extractPdfImages({ pdfPath: storedPath, documentId: created.id, maxImages: 12 });
+      if (documentImages.length > 0) {
+        extracted.meta = {
+          ...(extracted.meta || {}),
+          documentImages,
+        };
+      }
+    }
 
     const chunks = chunkText(extracted.text);
     if (chunks.length === 0) throw new Error('No text content found after extraction');
@@ -147,7 +317,10 @@ export async function ingestDocumentFromFile({
         documentId: created.id,
         chunkIndex,
         content,
-        metadata: extracted.meta ? { extract: extracted.meta } : undefined,
+        metadata:
+          chunkIndex === 0 && extracted.meta
+            ? { extract: extracted.meta }
+            : undefined,
       })),
     });
 
@@ -178,6 +351,7 @@ export async function ingestDocumentFromFile({
       sourceType,
       chunksCreated: chunkRows.count,
       embeddingsGenerated: Boolean(generateEmbeddings),
+      imagesExtracted: documentImages.length,
     };
   } catch (err) {
     await prisma.document.update({
