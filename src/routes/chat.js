@@ -8,7 +8,7 @@ import {
     getAllSessions,
     getSessionById,
     getSessionHistory
-} from '../controllers/chat.controller';
+} from '../controllers/chat.controller.js';
 import { sunitaChat } from '../controllers/llm.controller.js';
 import { natashaChat } from '../controllers/natasha.controller.js';
 import { getVisibleAvatarTeachers, getTeacherConfig } from '../controllers/avatarTeacher.controller.js';
