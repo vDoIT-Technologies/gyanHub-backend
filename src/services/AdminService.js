@@ -189,7 +189,7 @@ export class AdminService {
             try {
                 const refreshTokenMaxAge = AdminService.convertToMilliseconds(refreshSessionTime) / 1000;
                 const cookie = `refreshToken=${refreshToken}; HttpOnly; Max-Age=${refreshTokenMaxAge}; Secure; SameSite=None; Path=/`;
-                context.header('Set-Cookie', cookie);
+                context.res.headers.append('Set-Cookie', cookie);
             } catch (error) {
                 throw ErrorResponse.internalServerError('Error setting refresh token cookie');
             }
