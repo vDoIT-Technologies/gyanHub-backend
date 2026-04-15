@@ -18,17 +18,16 @@ import documentRoutes from './routes/documents.js';
 const app = new Hono().basePath('/api/v1');
 
 global.revokedTokens = new Set();
-app.use(logger());
-
-app.use(prettyJSON());
-
-app.use(trimTrailingSlash());
 app.use('*', cors({
     origin: (origin) => origin, // Dynamically allows the requesting origin to support credentials
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    allowHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }));
+
+app.use(logger());
+app.use(prettyJSON());
+app.use(trimTrailingSlash());
 
 app.use('*', async (c, next) => {
     try {
@@ -36,8 +35,9 @@ app.use('*', async (c, next) => {
         c.header('X-Powered-By', 'Sentience');
         c.header('X-SENTIENCE-ENV', ENV.NODE_ENV || 'development');
     } catch (err) {
-        console.error('Middleware error:', err);
-        return c.text('Internal Server Error', 500);
+        // Re-throw the error so app.onError(errorHandler) can handle it properly
+        // with the appropriate context and headers.
+        throw err;
     }
 });
 
