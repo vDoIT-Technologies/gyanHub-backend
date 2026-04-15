@@ -23,7 +23,12 @@ app.use(logger());
 app.use(prettyJSON());
 
 app.use(trimTrailingSlash());
-app.use(cors());
+app.use('*', cors({
+    origin: (origin) => origin, // Dynamically allows the requesting origin to support credentials
+    credentials: true,
+    allowHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+}));
 
 app.use('*', async (c, next) => {
     try {
