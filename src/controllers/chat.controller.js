@@ -1,4 +1,4 @@
-import { ChatService } from '../services/ChatService';
+import { ChatService } from '../services/ChatService.js';
 import { SuccessResponse } from '../lib/success.res.js';
 import { ErrorResponse } from '../lib/error.res.js';
 import { ENV } from '../configs/constant.js';
