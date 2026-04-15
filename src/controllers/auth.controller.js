@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { registerSchema, resetPasswordSchema } from '../utils/validationSchema';
-import { AuthService } from '../services/AuthService';
-import { SuccessResponse } from '../lib/success.res';
-import { ErrorResponse } from '../lib/error.res';
+import { registerSchema, resetPasswordSchema } from '../utils/validationSchema.js';
+import { AuthService } from '../services/AuthService.js';
+import { SuccessResponse } from '../lib/success.res.js';
+import { ErrorResponse } from '../lib/error.res.js';
 
 const authService = new AuthService();
 

@@ -1,8 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import { ethers } from 'ethers';
 import jwt from 'jsonwebtoken';
-import { UserService } from './UserService';
-import { abi } from '../utils/contract';
+import { UserService } from './UserService.js';
+import { abi } from '../utils/contract.js';
 import { ErrorResponse } from '../lib/error.res.js';
 import { ENV } from '../configs/constant.js';
 import crypto from 'crypto';

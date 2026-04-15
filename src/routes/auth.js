@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { forgotPassword, login, register, resetPassword, verifyAccount } from '../controllers/auth.controller';
+import { forgotPassword, login, register, resetPassword, verifyAccount } from '../controllers/auth.controller.js';
 
 const app = new Hono();
 
