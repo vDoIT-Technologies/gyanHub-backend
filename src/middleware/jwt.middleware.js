@@ -1,4 +1,4 @@
-import { verify } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 import { ENV } from '../configs/constant.js';
 import { ErrorResponse } from '../lib/error.res.js';
 
@@ -10,16 +10,12 @@ const jwtAuthMiddleware = async (c, next) => {
         token = authHeader.split(' ')[1];
     }
 
-    // if (!token) {
-    //     token = c.req.cookie('authToken');
-    // }
-
     if (!token) {
         throw ErrorResponse.unauthorized('No token provided');
     }
 
     try {
-        const payload = verify(token, ENV.JWT_SECRET);
+        const payload = jwt.verify(token, ENV.JWT_SECRET);
 
         const { userId, address } = payload;
 
