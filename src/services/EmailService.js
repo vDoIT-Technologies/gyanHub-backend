@@ -8,10 +8,10 @@ const __dirname = path.resolve();
 
 const SES_CONFIG = {
     credentials: {
-        accessKeyId: ENV.AWS_ACCESS_KEY,
+        accessKeyId: ENV.MY_AWS_ACCESS_KEY,
         secretAccessKey: ENV.AWS_SECRET_ACCESS_KEY
     },
-    region: ENV.AWS_REGION
+    region: ENV.MY_AWS_REGION
 };
 
 const sesClient = new SESClient(SES_CONFIG);
