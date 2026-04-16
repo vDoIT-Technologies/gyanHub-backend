@@ -65,7 +65,7 @@ app.delete('/:id', async (c) => {
     return c.json({ error: result.error || 'Failed to delete course' }, 500);
   }
 
-  return c.json({ success: true, deleted_course_id: courseId, deleted_at: result.deletedAt || null }, 200);
+  return c.json({ success: true, deleted_course_id: courseId }, 200);
 });
 
 export default app;
