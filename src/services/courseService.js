@@ -4,6 +4,7 @@ import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import { ENV } from '../configs/constant.js';
 import prisma from '../lib/prisma.js';
 import { fetchAllImages } from './imageLibraryService.js';
+import { normalizePublicUploadUrl, normalizeUploadsInText } from '../utils/publicUrl.js';
 
 const client = new OpenAI({ apiKey: ENV.OPENAI_API_KEY });
 const elevenlabs = new ElevenLabsClient({ apiKey: ENV.ELEVENLABS_API_KEY });
@@ -606,9 +607,9 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
       slides: saved.slides.map((s) => ({
         id: s.id,
         title: s.title,
-        content: s.content,
+        content: normalizeUploadsInText(s.content),
         audioBase64: s.audioBase64 ?? null, // frontend uses this to play audio
-        imageUrls: s.imageUrls ?? [],
+        imageUrls: (s.imageUrls ?? []).map((url) => normalizePublicUploadUrl(url)),
       })),
     };
   } catch (err) {
@@ -647,9 +648,9 @@ export async function fetchCourse(courseId) {
     slides: course.slides.map((s) => ({
       id: s.id,
       title: s.title,
-      content: s.content,
+      content: normalizeUploadsInText(s.content),
       audioBase64: s.audioBase64 ?? null, // included on fetch too
-      imageUrls: s.imageUrls ?? [],
+      imageUrls: (s.imageUrls ?? []).map((url) => normalizePublicUploadUrl(url)),
     })),
   };
 }
