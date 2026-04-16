@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { OpenAI } from 'openai';
 import { ENV } from '../configs/constant.js';
 import prisma from '../lib/prisma.js';
+import { normalizePublicUploadUrl } from '../utils/publicUrl.js';
 
 const openai = new OpenAI({ apiKey: ENV.OPENAI_API_KEY });
 
@@ -58,5 +59,9 @@ export async function addImageToLibrary({ url, description, tags = [], generateE
 }
 
 export async function fetchAllImages() {
-  return prisma.imageLibrary.findMany({ orderBy: { createdAt: 'desc' } });
+  const images = await prisma.imageLibrary.findMany({ orderBy: { createdAt: 'desc' } });
+  return images.map((image) => ({
+    ...image,
+    url: normalizePublicUploadUrl(image.url),
+  }));
 }

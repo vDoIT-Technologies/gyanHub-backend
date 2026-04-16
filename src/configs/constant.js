@@ -5,6 +5,8 @@ const ENV = {
     DATABASE_URL: process.env.DATABASE_URL,
     DB_PORT: process.env.DB_PORT,
     BASE_URL: process.env.BASE_URL,
+    PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+    RENDER_EXTERNAL_URL: process.env.RENDER_EXTERNAL_URL,
     MY_AWS_ACCESS_KEY: process.env.MY_AWS_ACCESS_KEY,
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
     MY_AWS_REGION: process.env.MY_AWS_REGION,

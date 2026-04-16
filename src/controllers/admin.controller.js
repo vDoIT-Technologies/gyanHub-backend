@@ -396,8 +396,8 @@ const uploadImageToLibrary = async (c) => {
         const buffer = await file.arrayBuffer();
         await fs.writeFile(filePath, Buffer.from(buffer));
 
-        // 4. Construct URL using local BASE_URL (e.g., http://localhost:3009/api/v1)
-        const url = `${ENV.BASE_URL}/uploads/${fileName}`;
+        // Store app-relative URL so it works across localhost and production hosts.
+        const url = `/api/v1/uploads/${fileName}`;
         const newImage = await addImageToLibrary({ url, description, tags });
 
         return SuccessResponse.ok(c, newImage, 'Image uploaded locally successfully');
