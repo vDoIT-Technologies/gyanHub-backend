@@ -8,7 +8,7 @@ const wss = new WebSocketServer({ server });
 
 WebsocketsChat(wss);
 
-const PORT = ENV.WS_PORT || 3010;
+const PORT = Number(ENV.WS_PORT) || 3010;
 server.listen(PORT, () => {
     if (ENV.NODE_ENV == 'development') {
         console.log(`WebSocket server is running on ws://localhost:${PORT}`);
