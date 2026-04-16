@@ -58,7 +58,7 @@ app.route("/documents", documentRoutes);
 app.onError(errorHandler);
 
 
-const port = ENV.PORT || 3009;
+const port = Number(ENV.PORT) || 3009;
 if (ENV.NODE_ENV == 'development') {
     console.log(`Server is running on port ${port}`);
 }

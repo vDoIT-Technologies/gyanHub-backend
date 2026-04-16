@@ -19,6 +19,8 @@ const ENV = {
     ETH_PROVIDER: process.env.ETH_PROVIDER,
     BINANCE_PROVIDER: process.env.BINANCE_PROVIDER,
     NODE_ENV: process.env.NODE_ENV,
+    PORT: process.env.PORT,
+    WS_PORT: process.env.WS_PORT,
     WEBSOCKET_URL_BEN_SNET: process.env.WEBSOCKET_URL_BEN_SNET,
     BEN_SNET_ID: process.env.BEN_SNET_ID,
     ELEVEN_LABS_API_URL: process.env.ELEVEN_LABS_API_URL
