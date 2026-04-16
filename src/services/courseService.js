@@ -679,7 +679,7 @@ export async function deleteCourseById(courseId) {
     if (deleted.count === 0) {
       return { success: false, notFound: true, error: 'Course not found' };
     }
-    return { success: true, deletedAt: null };
+    return { success: true };
   } catch (err) {
     console.error('Error in deleteCourseById:', err);
     return { success: false, error: 'Failed to delete course' };

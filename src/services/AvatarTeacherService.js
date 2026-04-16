@@ -33,7 +33,7 @@ export class AvatarTeacherService {
 
     /** Returns all teachers that are visible to the user panel */
     async getVisibleTeachers() {
-        return prisma.avatarTeacher.findMany({
+        const teachers = await prisma.avatarTeacher.findMany({
             where: { isVisible: true },
             select: {
                 id: true,
@@ -42,10 +42,17 @@ export class AvatarTeacherService {
                 imageUrl: true,
                 points: true,
                 isActive: true,
-                topics: true
+                topics: true,
+                personalityId: true
             },
             orderBy: { createdAt: 'asc' }
         });
+
+        // `brainId` is kept as a compatibility alias for older clients.
+        return teachers.map((teacher) => ({
+            ...teacher,
+            brainId: teacher.personalityId || null
+        }));
     }
 
     /** Returns full config for a specific teacher (used by chat) */
@@ -53,6 +60,10 @@ export class AvatarTeacherService {
         const teacher = await prisma.avatarTeacher.findUnique({ where: { id } });
         if (!teacher) throw ErrorResponse.notFound('Avatar teacher not found');
         if (!teacher.isActive) throw ErrorResponse.badRequest('This teacher is currently inactive');
-        return teacher;
+        return {
+            ...teacher,
+            // `brainId` is kept as a compatibility alias for older clients.
+            brainId: teacher.personalityId || null
+        };
     }
 }
