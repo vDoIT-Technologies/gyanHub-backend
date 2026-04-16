@@ -1,12 +1,12 @@
 import { AdminService } from '../services/AdminService.js';
 import { ChatService } from '../services/ChatService.js';
 import FormData from 'form-data';
+import { randomUUID } from 'node:crypto';
 import { SuccessResponse } from '../lib/success.res.js';
 import { ErrorResponse } from '../lib/error.res.js';
 import { addImageToLibrary, fetchAllImages } from '../services/imageLibraryService.js';
 import { ENV } from '../configs/constant.js';
-import fs from 'node:fs/promises';
-import path from 'node:path';
+import { supabase } from '../lib/supabase.js';
 
 const adminService = new AdminService();
 const chatService = new ChatService();
@@ -370,7 +370,7 @@ const deleteFile = async (c) => {
 };
 
 /**
- * uploadImageToLibrary - Handles local file storage and DB entry.
+ * uploadImageToLibrary - Uploads image to Supabase Storage and stores DB entry.
  */
 const uploadImageToLibrary = async (c) => {
     try {
@@ -383,24 +383,40 @@ const uploadImageToLibrary = async (c) => {
             throw ErrorResponse.badRequest('Image file and description are required');
         }
 
-        // 1. Generate local file path
-        const fileName = `${Date.now()}-${file.name.replace(/\s+/g, '-')}`;
-        const uploadDir = path.join(process.cwd(), 'public', 'uploads');
-        
-        // 2. Create the folder in local repo if it doesn't exist
-        await fs.mkdir(uploadDir, { recursive: true });
+        if (!ENV.SUPABASE_STORAGE_BUCKET) {
+            throw ErrorResponse.internalServerError('SUPABASE_STORAGE_BUCKET is not configured');
+        }
 
-        const filePath = path.join(uploadDir, fileName);
-        
-        // 3. Write binary to disk
+        // Upload to Supabase Storage using a collision-resistant object path.
+        const safeFileName = (file.name || 'image')
+            .replace(/[^a-zA-Z0-9._-]/g, '-')
+            .replace(/-+/g, '-');
+        const objectPath = `uploads/${Date.now()}-${randomUUID()}-${safeFileName}`;
         const buffer = await file.arrayBuffer();
-        await fs.writeFile(filePath, Buffer.from(buffer));
 
-        // Store app-relative URL so it works across localhost and production hosts.
-        const url = `/api/v1/uploads/${fileName}`;
+        const { error: uploadError } = await supabase.storage
+            .from(ENV.SUPABASE_STORAGE_BUCKET)
+            .upload(objectPath, Buffer.from(buffer), {
+                contentType: file.type || 'application/octet-stream',
+                upsert: false
+            });
+
+        if (uploadError) {
+            throw ErrorResponse.internalServerError(`Supabase upload failed: ${uploadError.message}`);
+        }
+
+        const { data: publicData } = supabase.storage
+            .from(ENV.SUPABASE_STORAGE_BUCKET)
+            .getPublicUrl(objectPath);
+
+        const url = publicData?.publicUrl;
+        if (!url) {
+            throw ErrorResponse.internalServerError('Failed to generate public URL for uploaded image');
+        }
+
         const newImage = await addImageToLibrary({ url, description, tags });
 
-        return SuccessResponse.ok(c, newImage, 'Image uploaded locally successfully');
+        return SuccessResponse.ok(c, newImage, 'Image uploaded successfully');
     } catch (error) {
         throw error;
     }
