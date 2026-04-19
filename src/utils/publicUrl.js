@@ -49,7 +49,7 @@ export function normalizePublicUploadUrl(url) {
 export function normalizeUploadsInText(text) {
     const value = String(text || '');
     return value.replace(
-        /https?:\/\/(?:localhost|127\.0\.0\.1):\d+(\/api\/v1\/uploads\/[^\s)"]+)/gi,
+        /(?:https?:\/\/(?:localhost|127\.0\.0\.1):\d+)?(\/(?:api\/v1\/)?uploads\/[^\s)"]+)/gi,
         (_, path) => normalizePublicUploadUrl(path)
     );
 }

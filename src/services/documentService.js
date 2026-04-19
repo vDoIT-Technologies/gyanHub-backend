@@ -129,12 +129,85 @@ function parsePdfImagesListOutput(stdout) {
     if (!/^\d+\s+\d+\s+/.test(line)) continue;
     const parts = line.split(/\s+/);
     const page = Number(parts[0]);
+    const num = Number(parts[1]);
+    const type = parts[2] || '';
+    const width = Number(parts[3]);
+    const height = Number(parts[4]);
+    const color = parts[5] || '';
+    const comp = Number(parts[6]);
+    const bpc = Number(parts[7]);
+    const enc = parts[8] || '';
+    const interp = parts[9] === 'yes';
+    const objectId = parts[10] || '';
+    const xPpi = Number(parts[12]);
+    const yPpi = Number(parts[13]);
+    const size = parts[14] || '';
+    const ratio = parts[15] || '';
+
     if (Number.isFinite(page)) {
-      rows.push({ page });
+      rows.push({
+        page,
+        num,
+        type,
+        width,
+        height,
+        color,
+        comp,
+        bpc,
+        enc,
+        interp,
+        objectId,
+        xPpi,
+        yPpi,
+        size,
+        ratio,
+      });
     }
   }
 
   return rows;
+}
+
+function parseByteSize(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^([\d.]+)\s*([KMG]?B)$/i);
+  if (!match) return 0;
+
+  const amount = Number(match[1]);
+  const unit = match[2].toUpperCase();
+  if (!Number.isFinite(amount)) return 0;
+  if (unit === 'KB') return amount * 1024;
+  if (unit === 'MB') return amount * 1024 * 1024;
+  if (unit === 'GB') return amount * 1024 * 1024 * 1024;
+  return amount;
+}
+
+function isLikelyLowInformationPdfImage(row) {
+  if (!row) return true;
+
+  const type = String(row.type || '').toLowerCase();
+  const color = String(row.color || '').toLowerCase();
+  const width = Number(row.width) || 0;
+  const height = Number(row.height) || 0;
+  const area = width * height;
+  const bytes = parseByteSize(row.size);
+  const bytesPerPixel = area > 0 ? bytes / area : 0;
+
+  if (['mask', 'smask', 'stencil'].includes(type)) return true;
+  if (width < 140 || height < 140 || area < 50000) return true;
+
+  // Large but extremely small monochrome/grayscale assets are usually blank fills,
+  // masks, or page decorations rather than useful teaching visuals.
+  if (['gray', 'mono', 'monochrome', 'index'].includes(color) && area > 250000 && bytesPerPixel < 0.035) {
+    return true;
+  }
+
+  // Highly compressible large images with almost no data are often white/empty.
+  if (area > 400000 && bytesPerPixel < 0.018) {
+    return true;
+  }
+
+  return false;
 }
 
 async function getPdfPageText(pdfPath, pageNum) {
@@ -170,6 +243,9 @@ async function extractPdfImages({ pdfPath, documentId, maxImages = 12 }) {
   for (let i = 0; i < imageFiles.length && documentImages.length < maxImages; i++) {
     const filename = imageFiles[i];
     const row = pageRows[i] || null;
+    if (isLikelyLowInformationPdfImage(row)) {
+      continue;
+    }
     const pageNum = row?.page || null;
 
     let pageText = '';

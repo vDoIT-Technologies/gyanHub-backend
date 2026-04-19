@@ -1,6 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { OpenAI } from 'openai';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { ENV } from '../configs/constant.js';
 import prisma from '../lib/prisma.js';
 import { fetchAllImages } from './imageLibraryService.js';
@@ -15,6 +17,7 @@ const IMAGE_MARKDOWN_TEST_RE = /!\[.*?\]\(.*?\)/;
 const IMAGE_MARKDOWN_URL_RE = /!\[[^\]]*]\(([^)]+)\)/g;
 const LINK_MARKDOWN_RE = /(?<!!)\[([^\]]*)\]\(([^)]+)\)/g;
 const IMAGE_DISTANCE_THRESHOLD = 0.45;
+const OPENAI_IMAGE_MODEL = 'gpt-image-1';
 const STOPWORDS = new Set([
   'the','a','an','and','or','of','to','in','on','for','with','by','from','at','as','is','are',
   'was','were','be','been','being','this','that','these','those','it','its','into','over','under',
@@ -55,6 +58,33 @@ function buildImageIndex(images) {
     const imageId = img.id || img.url || `image-${normalizeText(text).slice(0, 40) || 'unknown'}`;
     return { ...img, id: imageId, _tokenSet: tokenSet };
   });
+}
+
+async function isUsableDocumentImage(img) {
+  const url = String(img?.url || '').trim();
+  if (!url) return false;
+
+  const description = String(img?.description || '').trim().toLowerCase();
+  const tags = Array.isArray(img?.tags) ? img.tags.filter(Boolean) : [];
+  if (!tags.length && /^extracted document image(?: from page \d+)?$/i.test(description)) {
+    return false;
+  }
+
+  const uploadsMatch = url.match(/^\/api\/v1\/uploads\/(.+)$/i);
+  if (!uploadsMatch) return true;
+
+  try {
+    const filePath = path.join(process.cwd(), 'public', uploadsMatch[1]);
+    const stats = await fs.stat(filePath);
+    if (!stats.isFile()) return false;
+
+    // Tiny extracted assets are usually masks, separators, or blank placeholders.
+    if (stats.size < 4096) return false;
+  } catch {
+    return false;
+  }
+
+  return true;
 }
 
 function scoreImageForSlide(image, slideTokens) {
@@ -309,7 +339,7 @@ async function getDocumentImagesFromDocumentId(documentId) {
   const images = extracted?.documentImages;
   if (!Array.isArray(images)) return [];
 
-  return images
+  const mappedImages = images
     .filter((img) => typeof img?.url === 'string' && img.url.trim())
     .map((img, index) => ({
       id: `docimg-${documentId}-${index}`,
@@ -318,6 +348,192 @@ async function getDocumentImagesFromDocumentId(documentId) {
       description: img.description || 'Document image',
       tags: Array.isArray(img.tags) ? img.tags : [],
     }));
+
+  const usability = await Promise.all(mappedImages.map((img) => isUsableDocumentImage(img)));
+  return mappedImages.filter((_, index) => usability[index]);
+}
+
+function resolveTeacherCoursePolicy(teacher, documentId) {
+  if (documentId) {
+    return {
+      useTeacherKnowledge: true,
+      useDatabaseDocs: true,
+      requireDocumentContext: true,
+      allowGeneralKnowledge: false,
+      imageMode: 'document',
+    };
+  }
+
+  const teacherName = String(teacher?.name || '').trim().toLowerCase();
+  const teacherCategory = String(teacher?.category || '').trim().toLowerCase();
+
+  if (teacherName === 'dr. asha verma' || teacherCategory.includes('health')) {
+    return {
+      useTeacherKnowledge: true,
+      useDatabaseDocs: true,
+      requireDocumentContext: true,
+      allowGeneralKnowledge: false,
+      imageMode: 'document',
+    };
+  }
+
+  if (teacherName === 'prof. sunita rao' || teacherCategory.includes('science')) {
+    return {
+      useTeacherKnowledge: true,
+      useDatabaseDocs: false,
+      requireDocumentContext: false,
+      allowGeneralKnowledge: true,
+      imageMode: 'openai',
+    };
+  }
+
+  return {
+    useTeacherKnowledge: true,
+    useDatabaseDocs: true,
+    requireDocumentContext: false,
+    allowGeneralKnowledge: false,
+    imageMode: 'library',
+  };
+}
+
+async function getRelevantDocumentBundle(topic, { maxDocs = 3, maxChunksPerDoc = 10, maxImages = 10 } = {}) {
+  const safeTopic = String(topic || '').trim();
+  if (!safeTopic) return { context: '', images: [] };
+
+  let docs = await prisma.document.findMany({
+    where: {
+      title: { contains: safeTopic, mode: 'insensitive' },
+      status: 'READY',
+    },
+    include: {
+      chunks: {
+        orderBy: { chunkIndex: 'asc' },
+        take: maxChunksPerDoc,
+        select: { content: true, metadata: true },
+      },
+    },
+    take: maxDocs,
+  });
+
+  if (docs.length === 0) {
+    try {
+      const embeddingResponse = await client.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: safeTopic,
+      });
+      const vector = embeddingResponse.data[0].embedding;
+      const vectorString = `[${vector.join(',')}]`;
+
+      const matchingDocs = await prisma.$queryRaw(
+        Prisma.sql`
+          SELECT dc."document_id" AS "documentId",
+                 MIN(dc."embedding" <=> ${vectorString}::vector) AS distance
+          FROM "document_chunks" dc
+          INNER JOIN "documents" d ON d."id" = dc."document_id"
+          WHERE d."status" = 'READY'
+            AND dc."embedding" IS NOT NULL
+          GROUP BY dc."document_id"
+          ORDER BY distance ASC
+          LIMIT ${maxDocs}
+        `
+      );
+
+      const orderedDocIds = (Array.isArray(matchingDocs) ? matchingDocs : [])
+        .map((row) => row.documentId)
+        .filter(Boolean);
+
+      if (orderedDocIds.length > 0) {
+        const fetchedDocs = await prisma.document.findMany({
+          where: { id: { in: orderedDocIds } },
+          include: {
+            chunks: {
+              orderBy: { chunkIndex: 'asc' },
+              take: maxChunksPerDoc,
+              select: { content: true, metadata: true },
+            },
+          },
+        });
+
+        const orderMap = new Map(orderedDocIds.map((id, index) => [id, index]));
+        docs = fetchedDocs.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+      }
+    } catch (err) {
+      console.error('[Retrieval] Failed to fetch semantic document bundle:', err.message);
+    }
+  }
+
+  if (docs.length === 0) return { context: '', images: [] };
+
+  const context = docs
+    .map((doc) => {
+      const metadataLines = [
+        `Document Title: ${doc.title || ''}`,
+        `Source Type: ${doc.sourceType || ''}`,
+        `Original Filename: ${doc.originalName || ''}`,
+      ];
+      const chunkText = (doc.chunks || []).map((chunk) => chunk.content).join('\n\n');
+      return `${metadataLines.join('\n')}\n\nDocument Content:\n${chunkText}`;
+    })
+    .join('\n\n---\n\n');
+
+  const imageGroups = await Promise.all(
+    docs.map(async (doc) => getDocumentImagesFromDocumentId(doc.id))
+  );
+  const images = imageGroups.flat().slice(0, maxImages);
+
+  return { context, images };
+}
+
+async function saveGeneratedImage(base64Data, prefix = 'course-image') {
+  const outputDir = path.join(process.cwd(), 'public', 'uploads', 'generated-course-images');
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const safePrefix = String(prefix || 'course-image')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48) || 'course-image';
+
+  const fileName = `${Date.now()}-${safePrefix}-${Math.random().toString(36).slice(2, 8)}.png`;
+  const fullPath = path.join(outputDir, fileName);
+  await fs.writeFile(fullPath, Buffer.from(base64Data, 'base64'));
+
+  return `/api/v1/uploads/generated-course-images/${fileName}`;
+}
+
+async function generateOpenAiImageForSlide(topic, slide, slideIndex) {
+  try {
+    const prompt = `Create a clean educational science illustration for the topic "${topic}".
+Focus on the slide title "${slide.title}".
+Visual goals:
+- scientifically plausible
+- suitable for a learning slide
+- no watermarks
+- no decorative poster layout
+- minimal or no text inside the image
+- visually clear and concept-focused`;
+
+    const response = await client.images.generate({
+      model: OPENAI_IMAGE_MODEL,
+      prompt,
+      size: '1024x1024',
+    });
+
+    const imageBase64 = response.data?.[0]?.b64_json;
+    if (!imageBase64) return null;
+
+    const url = await saveGeneratedImage(imageBase64, `science-slide-${slideIndex + 1}`);
+    return {
+      id: `openai-science-${slideIndex + 1}`,
+      source: 'OPENAI',
+      url,
+      description: `AI-generated science illustration for ${slide.title}`,
+      tags: tokenize(`${topic} ${slide.title}`),
+    };
+  } catch (err) {
+    console.error(`[OpenAI Image] Failed for slide "${slide?.title || slideIndex + 1}":`, err.message);
+    return null;
+  }
 }
 
 async function createCourse(topic, numSlides = 5, teacherId, documentId = null) {
@@ -325,24 +541,30 @@ async function createCourse(topic, numSlides = 5, teacherId, documentId = null) 
 
   let extraContext = '';
   let imageIndex = [];
-  const strictDocumentOnlyMode = Boolean(documentId);
-  let systemPersona = 'You are a professional educational content architect. Your purpose is to structure and summarize provided document content into high-quality study materials. You must strictly adhere to the provided source material and never include external facts or general knowledge from your training data.';
+  let fallbackImageIndex = [];
+  let teacher = null;
+  let teacherPolicy = resolveTeacherCoursePolicy(null, documentId);
+  const strictDocumentOnlyMode = teacherPolicy.requireDocumentContext;
+  let systemPersona = 'You are a professional educational content architect. Your purpose is to structure and summarize provided document content into high-quality study materials.';
   let selectedVoiceId = DEFAULT_VOICE_ID;
 
-  if (teacherId && !strictDocumentOnlyMode) {
+  if (teacherId) {
     try {
-      const teacher = await prisma.avatarTeacher.findUnique({
+      teacher = await prisma.avatarTeacher.findUnique({
         where: { id: teacherId },
       });
 
       if (teacher) {
+        teacherPolicy = resolveTeacherCoursePolicy(teacher, documentId);
         selectedVoiceId = teacher.voiceId || DEFAULT_VOICE_ID;
-        extraContext += `
+        if (teacherPolicy.useTeacherKnowledge) {
+          extraContext += `
 TEACHER SPECIFIC KNOWLEDGE:
 ---
 ${teacher.knowledgeText || ''}
 ---
 Teacher Expertise: ${teacher.topics?.join(', ') || ''}\n`;
+        }
 
         systemPersona = `You are generating content on behalf of ${teacher.name}. Description: ${teacher.description}. 
 ${teacher.systemPrompt ? `Specific Teacher Instructions: ${teacher.systemPrompt}` : ''}`;
@@ -352,10 +574,28 @@ ${teacher.systemPrompt ? `Specific Teacher Instructions: ${teacher.systemPrompt}
     }
   }
 
+  const effectiveStrictDocumentMode = Boolean(documentId) || teacherPolicy.requireDocumentContext;
+
   // ── Step 0: Build context from document(s) ────────────────────────────────
-  const docContext = strictDocumentOnlyMode
-    ? await getContextFromDocumentId(documentId)
-    : await getContextFromDocuments(topic);
+  let docContext = '';
+  let documentImages = [];
+
+  if (teacherPolicy.useDatabaseDocs) {
+    if (documentId) {
+      docContext = await getContextFromDocumentId(documentId);
+      documentImages = await getDocumentImagesFromDocumentId(documentId);
+    } else if (teacherPolicy.requireDocumentContext) {
+      const bundle = await getRelevantDocumentBundle(topic);
+      docContext = bundle.context;
+      documentImages = bundle.images;
+    } else {
+      docContext = await getContextFromDocuments(topic);
+    }
+  }
+
+  if (teacherPolicy.requireDocumentContext && !docContext) {
+    throw new Error(`No relevant document data found for "${topic}" for ${teacher?.name || 'the selected teacher'}.`);
+  }
 
   if (docContext) {
     extraContext += `
@@ -363,13 +603,14 @@ SOURCE MATERIAL FROM DATABASE DOCUMENTS:
 ---
 ${docContext}
 ---
-/* INSTRUCTION: Prioritize the "SOURCE MATERIAL" above for factual content. If the material is insufficient, supplement it with your general knowledge. */
-INSTRUCTION: Strictly use ONLY the provided "SOURCE MATERIAL" for factual content. Do NOT supplement with any external knowledge.
+INSTRUCTION: ${teacherPolicy.allowGeneralKnowledge
+  ? 'Use the source material when it helps, but you may also use your own knowledge.'
+  : 'Strictly use ONLY the provided "SOURCE MATERIAL" for factual content. Do NOT supplement with any external knowledge.'}
 `;
   }
 
   // ── Step 0.5: Fetch Relevant Images from Library ────────────────────────
-  if (!strictDocumentOnlyMode) {
+  if (teacherPolicy.imageMode === 'library') {
     try {
       const images = await fetchAllImages();
       imageIndex = buildImageIndex(images);
@@ -394,27 +635,50 @@ ${relevantImages.map(img => `- URL: ${img.url} | Description: ${img.description}
     } catch (err) {
       console.error('[Image Retrieval] Failed:', err.message);
     }
-  } else if (documentId) {
-    try {
-      const documentImages = await getDocumentImagesFromDocumentId(documentId);
-      imageIndex = buildImageIndex(documentImages);
+  } else if (teacherPolicy.imageMode === 'document') {
+    imageIndex = buildImageIndex(documentImages);
 
-      if (documentImages.length > 0) {
-        extraContext += `
+    if (documentImages.length > 0) {
+      extraContext += `
 AVAILABLE VISUAL ASSETS:
 ---
 ${documentImages.map((img) => `- URL: ${img.url} | Description: ${img.description}`).join('\n')}
 ---
 `;
+    }
+
+    if (imageIndex.length === 0) {
+      try {
+        const uploadedImages = await fetchAllImages();
+        fallbackImageIndex = buildImageIndex(uploadedImages);
+        const topicLower = (topic || '').toLowerCase();
+        const relevantFallbackImages = uploadedImages.filter((img) => {
+          const desc = (img.description || '').toLowerCase();
+          const tags = Array.isArray(img.tags)
+            ? img.tags.join(' ').toLowerCase()
+            : (typeof img.tags === 'string' ? img.tags.toLowerCase() : '');
+          return desc.includes(topicLower) || tags.includes(topicLower);
+        }).slice(0, 10);
+
+        if (relevantFallbackImages.length > 0) {
+          extraContext += `
+FALLBACK VISUAL ASSETS:
+---
+${relevantFallbackImages.map((img) => `- URL: ${img.url} | Description: ${img.description}`).join('\n')}
+---
+`;
+        }
+      } catch (err) {
+        console.error('[Fallback Image Retrieval] Failed:', err.message);
       }
-    } catch (err) {
-      console.error('[Document Image Retrieval] Failed:', err.message);
     }
   }
 
   const userPrompt = `Create an elite-level study course on the topic: '${topic}'. The course must consist of exactly ${numSlides} slides.
 
-STRICT LIMITATION: All factual content, theories, and examples MUST be derived SOLELY from the "SOURCE MATERIAL" provided below. Do NOT use your own training data to add information.
+${teacherPolicy.allowGeneralKnowledge
+  ? 'Use your own expertise to produce accurate, clear educational content. If teacher guidance is provided, align with it.'
+  : 'STRICT LIMITATION: All factual content, theories, and examples MUST be derived SOLELY from the "SOURCE MATERIAL" provided below. Do NOT use your own training data to add information.'}
 
 ${extraContext}
 
@@ -427,6 +691,7 @@ For EACH slide, the 'content' field must follow these rules:
    - A section for a practical 'Real-World Example' or illustrative scenario.
    - A 'Key Study Takeaway' at the end of the content.
 4. Focus on explaining the "how" and "why" based exclusively on the provided text.
+${teacherPolicy.allowGeneralKnowledge ? '4a. If no source material is provided, explain accurately using your own knowledge.' : ''}
 5. Content should progress logically from foundations to complex applications across the slides.
 6. If "AVAILABLE VISUAL ASSETS" are provided and highly relevant to a slide's concept, embed them using standard Markdown: ![Description](URL).
 7. Limit to a maximum of 2 images per slide. Only include an image if it genuinely enhances the educational value of that specific slide.
@@ -475,12 +740,27 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
     const result = JSON.parse(raw);
 
     // ── Step 2: Ensure each slide has at least one relevant image ──────────
-    if (imageIndex.length > 0) {
+    if (teacherPolicy.imageMode === 'openai') {
+      const generatedImages = await Promise.all(
+        result.slides.map((slide, index) => generateOpenAiImageForSlide(topic, slide, index))
+      );
+
+      result.slides = result.slides.map((slide, index) => {
+        const image = generatedImages[index];
+        const contentWithoutImages = removeAllSlideImages(slide.content);
+        if (!image) return { ...slide, content: contentWithoutImages };
+        return {
+          ...slide,
+          content: insertImageAtPosition(contentWithoutImages, image, null),
+        };
+      });
+    } else if (imageIndex.length > 0 || fallbackImageIndex.length > 0) {
+      const effectiveImageIndex = imageIndex.length > 0 ? imageIndex : fallbackImageIndex;
       const usedImageIds = new Set();
       const usedImageUrls = new Set();
       const topicTokens = tokenize(topic);
-      const allowedUrls = new Set(imageIndex.map((img) => img.url));
-      const urlToImage = new Map(imageIndex.map((img) => [img.url, img]));
+      const allowedUrls = new Set(effectiveImageIndex.map((img) => img.url));
+      const urlToImage = new Map(effectiveImageIndex.map((img) => [img.url, img]));
       const updatedSlides = [];
 
       for (const slide of result.slides) {
@@ -503,7 +783,7 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
         let selectedImages = [];
 
         // Prefer vector similarity when embeddings exist
-        const vectorCandidates = strictDocumentOnlyMode
+        const vectorCandidates = effectiveStrictDocumentMode
           ? []
           : await findBestImageCandidatesByVector(slideText, 5);
         const vectorMatches = vectorCandidates
@@ -528,7 +808,7 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
           let bestScore = -1;
           let keywordBest = null;
 
-          for (const img of imageIndex) {
+          for (const img of effectiveImageIndex) {
             const score = scoreImageForSlide(img, slideTokens);
             if (score > bestScore || (score === bestScore && !usedImageIds.has(img.id))) {
               keywordBest = img;
@@ -539,7 +819,7 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
           if (!keywordBest || bestScore === 0) {
             let topicBest = null;
             let topicBestScore = -1;
-            for (const img of imageIndex) {
+            for (const img of effectiveImageIndex) {
               const score = scoreImageForSlide(img, topicTokens);
               if (score > topicBestScore || (score === topicBestScore && !usedImageIds.has(img.id))) {
                 topicBest = img;
