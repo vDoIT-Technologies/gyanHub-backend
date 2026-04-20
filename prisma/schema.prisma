@@ -78,6 +78,8 @@ model AvatarTeacher {
   isVisible      Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+
+  documents      Document[]
 }
 
 model Test {
@@ -155,6 +157,8 @@ model Document {
   id           String         @id @default(uuid())
   ownerId      String?        @map("owner_id")
   owner        User?          @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  teacherId    String?        @map("teacher_id")
+  teacher      AvatarTeacher? @relation(fields: [teacherId], references: [id], onDelete: SetNull)
   title        String
   sourceType   DocumentSource @map("source_type")
   mimeType     String?        @map("mime_type")
@@ -167,6 +171,7 @@ model Document {
   chunks DocumentChunk[]
 
   @@index([ownerId])
+  @@index([teacherId])
   @@map("documents")
 }
 

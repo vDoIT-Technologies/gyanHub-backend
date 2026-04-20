@@ -31,18 +31,41 @@ app.get('/all', async (c) => {
 
 // POST /courses/ — generate a new course
 app.post('/', async (c) => {
-  const { topic, num_slides = 5, teacherId, document_id, documentId } = await c.req.json();
+  const body = await c.req.json();
+  const {
+    topic,
+    num_slides = 5,
+    teacherId,
+    teacher_id,
+    document_id,
+    documentId,
+  } = body;
 
   if (!topic) {
     return c.json({ error: 'topic is required' }, 400);
   }
+
+  const selectedTeacherId =
+    typeof teacherId === 'string' && teacherId.trim()
+      ? teacherId.trim()
+      : (typeof teacher_id === 'string' && teacher_id.trim() ? teacher_id.trim() : null);
+
+  console.log('[Course Route] Incoming generation request', {
+    topic,
+    numSlides: Number(num_slides),
+    teacherId,
+    teacher_id,
+    selectedTeacherId,
+    documentId,
+    document_id,
+  });
 
   const selectedDocumentId =
     typeof document_id === 'string' && document_id.trim()
       ? document_id.trim()
       : (typeof documentId === 'string' && documentId.trim() ? documentId.trim() : null);
 
-  const courseId = await generateCourse(topic, Number(num_slides), teacherId, selectedDocumentId);
+  const courseId = await generateCourse(topic, Number(num_slides), selectedTeacherId, selectedDocumentId);
   if (!courseId) {
     return c.json({ error: 'Failed to generate course' }, 500);
   }

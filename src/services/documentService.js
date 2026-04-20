@@ -4,6 +4,7 @@ import pdf from 'pdf-parse';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ENV } from '../configs/constant.js';
+import { ErrorResponse } from '../lib/error.res.js';
 import prisma from '../lib/prisma.js';
 
 const openai = new OpenAI({ apiKey: ENV.OPENAI_API_KEY });
@@ -330,9 +331,37 @@ async function writeEmbeddingVector(chunkId, embedding) {
   );
 }
 
+async function resolveDocumentOwnerId(ownerId) {
+  if (ownerId == null) return null;
+
+  const normalizedOwnerId = String(ownerId).trim();
+  if (!normalizedOwnerId) return null;
+
+  // Check if owner is a User
+  let owner = await prisma.user.findUnique({
+    where: { id: normalizedOwnerId },
+    select: { id: true },
+  });
+
+  // If not a user, check if owner is an Admin
+  if (!owner) {
+    owner = await prisma.admin.findUnique({
+      where: { id: normalizedOwnerId },
+      select: { id: true },
+    });
+  }
+
+  if (!owner) {
+    throw ErrorResponse.badRequest('ownerId does not reference an existing user or admin');
+  }
+
+  return owner.id;
+}
+
 export async function ingestDocumentFromFile({
   file,
   ownerId = null,
+  teacherId = null,
   title = '',
   generateEmbeddings = false,
 } = {}) {
@@ -348,10 +377,20 @@ export async function ingestDocumentFromFile({
   }
 
   const docTitle = String(title || '').trim() || originalName;
+  const resolvedOwnerId = await resolveDocumentOwnerId(ownerId);
+  
+  // Normalize teacherId: handle empty strings and stringified "null"/"undefined"
+  const rawTeacherId = String(teacherId || '').trim();
+  const resolvedTeacherId = (rawTeacherId && rawTeacherId !== 'null' && rawTeacherId !== 'undefined') 
+    ? rawTeacherId 
+    : null;
+
+  const shouldEmbed = normalizeBool(generateEmbeddings);
 
   const created = await prisma.document.create({
     data: {
-      ownerId,
+      ownerId: resolvedOwnerId,
+      teacherId: resolvedTeacherId,
       title: docTitle,
       sourceType,
       mimeType,
@@ -400,7 +439,7 @@ export async function ingestDocumentFromFile({
       })),
     });
 
-    if (generateEmbeddings) {
+    if (shouldEmbed) {
       // Insert embeddings via raw SQL into the pgvector column
       const embeddings = await embedTexts(chunks);
       const createdChunks = await prisma.documentChunk.findMany({
@@ -426,7 +465,7 @@ export async function ingestDocumentFromFile({
       id: created.id,
       sourceType,
       chunksCreated: chunkRows.count,
-      embeddingsGenerated: Boolean(generateEmbeddings),
+      embeddingsGenerated: shouldEmbed,
       imagesExtracted: documentImages.length,
     };
   } catch (err) {
@@ -441,15 +480,25 @@ export async function ingestDocumentFromFile({
 export async function ingestDocumentFromText({
   text,
   ownerId = null,
+  teacherId = null,
   title = 'Untitled document',
   generateEmbeddings = false,
 } = {}) {
   const s = String(text || '').trim();
   if (!s) throw new Error('text is required');
+  const resolvedOwnerId = await resolveDocumentOwnerId(ownerId);
+  
+  const rawTeacherId = String(teacherId || '').trim();
+  const resolvedTeacherId = (rawTeacherId && rawTeacherId !== 'null' && rawTeacherId !== 'undefined') 
+    ? rawTeacherId 
+    : null;
+    
+  const shouldEmbed = normalizeBool(generateEmbeddings);
 
   const created = await prisma.document.create({
     data: {
-      ownerId,
+      ownerId: resolvedOwnerId,
+      teacherId: resolvedTeacherId,
       title: String(title || '').trim() || 'Untitled document',
       sourceType: 'TEXT',
       mimeType: 'text/plain',
@@ -468,7 +517,7 @@ export async function ingestDocumentFromText({
       })),
     });
 
-    if (generateEmbeddings) {
+    if (shouldEmbed) {
       const embeddings = await embedTexts(chunks);
       const createdChunks = await prisma.documentChunk.findMany({
         where: { documentId: created.id },
@@ -483,28 +532,63 @@ export async function ingestDocumentFromText({
       }
     }
 
-    await prisma.document.update({ where: { id: created.id }, data: { status: 'READY' } });
+    await prisma.document.update({
+      where: { id: created.id },
+      data: { status: 'READY' },
+    });
 
     return {
       id: created.id,
       sourceType: 'TEXT',
       chunksCreated: chunkRows.count,
-      embeddingsGenerated: Boolean(generateEmbeddings),
+      embeddingsGenerated: shouldEmbed,
     };
   } catch (err) {
-    await prisma.document.update({ where: { id: created.id }, data: { status: 'FAILED' } });
+    await prisma.document.update({
+      where: { id: created.id },
+      data: { status: 'FAILED' },
+    });
     throw err;
   }
 }
 
+/**
+ * Fetches a single document by its ID including its chunks.
+ */
 export async function fetchDocument(documentId) {
-  return prisma.document.findUnique({
+  const document = await prisma.document.findUnique({
     where: { id: documentId },
     include: {
       chunks: {
         orderBy: { chunkIndex: 'asc' },
-        select: { id: true, chunkIndex: true, content: true, metadata: true },
       },
     },
+  });
+
+  if (!document) {
+    throw ErrorResponse.notFound('Document not found');
+  }
+
+  return document;
+}
+
+/**
+ * Fetches all documents associated with a specific teacher.
+ */
+export async function fetchDocumentsByTeacher(teacherId) {
+  if (!teacherId) return [];
+  
+  return prisma.document.findMany({
+    where: { teacherId },
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
+/**
+ * Deletes a document and its associated chunks.
+ */
+export async function deleteDocument(documentId) {
+  return prisma.document.delete({
+    where: { id: documentId },
   });
 }

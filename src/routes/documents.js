@@ -17,6 +17,7 @@ app.post('/', async (c) => {
   if (contentType.includes('application/json')) {
     const body = await c.req.json();
     const ownerId = body?.ownerId ?? body?.owner_id ?? null;
+    const teacherId = body?.teacherId ?? body?.teacher_id ?? null;
     const title = body?.title ?? 'Untitled document';
     const text = body?.text ?? '';
     const generateEmbeddings = body?.generate_embeddings ?? body?.generateEmbeddings ?? false;
@@ -24,6 +25,7 @@ app.post('/', async (c) => {
     const res = await ingestDocumentFromText({
       text,
       ownerId,
+      teacherId,
       title,
       generateEmbeddings: normalizeBool(generateEmbeddings),
     });
@@ -36,10 +38,12 @@ app.post('/', async (c) => {
   const text = form.get('text');
 
   const ownerId = form.get('ownerId') ?? form.get('owner_id');
+  const teacherId = form.get('teacherId') ?? form.get('teacher_id');
   const title = form.get('title');
   const generateEmbeddings = form.get('generate_embeddings') ?? form.get('generateEmbeddings');
 
   const normalizedOwnerId = typeof ownerId === 'string' && ownerId.trim() ? ownerId.trim() : null;
+  const normalizedTeacherId = typeof teacherId === 'string' && teacherId.trim() ? teacherId.trim() : null;
   const normalizedTitle = typeof title === 'string' ? title : '';
   const normalizedGenerateEmbeddings = normalizeBool(generateEmbeddings);
 
@@ -47,6 +51,7 @@ app.post('/', async (c) => {
     const res = await ingestDocumentFromFile({
       file,
       ownerId: normalizedOwnerId,
+      teacherId: normalizedTeacherId,
       title: normalizedTitle,
       generateEmbeddings: normalizedGenerateEmbeddings,
     });
@@ -57,6 +62,7 @@ app.post('/', async (c) => {
     const res = await ingestDocumentFromText({
       text,
       ownerId: normalizedOwnerId,
+      teacherId: normalizedTeacherId,
       title: normalizedTitle || 'Untitled document',
       generateEmbeddings: normalizedGenerateEmbeddings,
     });
