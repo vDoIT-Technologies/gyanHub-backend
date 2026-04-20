@@ -13,6 +13,12 @@ const parseTopics = (topicsRaw) => {
     try { return JSON.parse(topicsRaw); } catch { return topicsRaw.split(',').map(t => t.trim()).filter(Boolean); }
 };
 
+const parseOptionalBoolean = (value) => {
+    if (value === null || value === undefined) return undefined;
+    if (typeof value === 'boolean') return value;
+    return String(value).toLowerCase() === 'true';
+};
+
 /**
  * Helper to upload files to persona service and get a personalityId
  * @param {Object} data - Metadata for the persona (name, description, etc)
@@ -75,8 +81,8 @@ export const createAvatarTeacher = async (c) => {
         const svc = formData.get('service');
         const topicsRaw = formData.get('topics');
         const points = formData.get('points');
-        const isActive = formData.get('isActive') === 'true';
-        const isVisible = formData.get('isVisible') === 'true';
+        const isActive = parseOptionalBoolean(formData.get('isActive'));
+        const isVisible = parseOptionalBoolean(formData.get('isVisible'));
 
         if (!name) throw ErrorResponse.badRequest('Name is required');
 
@@ -105,8 +111,8 @@ export const createAvatarTeacher = async (c) => {
             systemPrompt: sysPrompt || null,
             topics: parseTopics(topicsRaw),
             points: Number(points) || 0,
-            isActive,
-            isVisible,
+            ...(isActive !== undefined ? { isActive } : {}),
+            ...(isVisible !== undefined ? { isVisible } : {}),
         });
 
         return SuccessResponse.ok(c, teacher, 'Avatar teacher created successfully');

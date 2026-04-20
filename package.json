@@ -17,6 +17,8 @@
     "dev:ws": "bun --hot src/wss.js",
     "ingest": "bun ingestPdfToVectorDB.js -d ./documents",
     "seed": "bun prisma/seeds/seed_admin.js",
+    "seed:health-teacher": "bun prisma/seeds/seed_health_teacher.js",
+    "seed:science-teacher": "bun prisma/seeds/seed_science_teacher.js",
     "format": "prettier --write ."
   },
   "dependencies": {
