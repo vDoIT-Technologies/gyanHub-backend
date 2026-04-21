@@ -3,6 +3,7 @@ import { OpenAI } from 'openai';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { ENV } from '../configs/constant.js';
 import { ErrorResponse } from '../lib/error.res.js';
 import prisma from '../lib/prisma.js';
@@ -18,6 +19,10 @@ const IMAGE_MARKDOWN_TEST_RE = /!\[.*?\]\(.*?\)/;
 const IMAGE_MARKDOWN_URL_RE = /!\[[^\]]*]\(([^)]+)\)/g;
 const LINK_MARKDOWN_RE = /(?<!!)\[([^\]]*)\]\(([^)]+)\)/g;
 const IMAGE_DISTANCE_THRESHOLD = 0.45;
+const SLIDE_IMAGE_VECTOR_LIMIT = 5;
+const MIN_SLIDE_IMAGE_KEYWORD_SCORE = 2;
+const STRICT_IMAGE_DISTANCE_THRESHOLD = 0.3;
+const STRICT_KEYWORD_SCORE = 3;
 const STOPWORDS = new Set([
   'the','a','an','and','or','of','to','in','on','for','with','by','from','at','as','is','are',
   'was','were','be','been','being','this','that','these','those','it','its','into','over','under',
@@ -158,6 +163,12 @@ function buildImageMarkdown(alt, url) {
   return `![${safeAlt}](${String(url || '').trim()})`;
 }
 
+function dedupeImagesByUrl(images) {
+  return (images || []).filter(
+    (img, index, arr) => arr.findIndex((candidate) => candidate.url === img.url) === index
+  );
+}
+
 function normalizeAllowedLinksToImages(content, allowedUrls) {
   return String(content || '').replace(LINK_MARKDOWN_RE, (full, label, url) => {
     const normalizedUrl = String(url || '').trim();
@@ -192,6 +203,97 @@ async function findBestImageCandidatesByVector(slideText, limit = 5) {
   );
 
   return Array.isArray(rows) ? rows : [];
+}
+
+async function getSlideVectorCandidates(slideText, limit = SLIDE_IMAGE_VECTOR_LIMIT) {
+  const vectorCandidates = await findBestImageCandidatesByVector(slideText, limit);
+  return buildImageIndex(
+    vectorCandidates
+      .filter((img) => Number(img?.distance) <= IMAGE_DISTANCE_THRESHOLD)
+      .map((img) => ({
+        id: img.id,
+        url: normalizePublicUploadUrl(img.url),
+        description: img.description || 'Uploaded image',
+        tags: Array.isArray(img.tags) ? img.tags : [],
+        source: 'UPLOAD',
+        distance: Number(img.distance),
+      }))
+  );
+}
+
+async function getStrictSlideVectorCandidates(slideText, allowedUrls = null, limit = SLIDE_IMAGE_VECTOR_LIMIT) {
+  const candidates = await getSlideVectorCandidates(slideText, limit);
+  return candidates.filter((img) => {
+    const distance = Number(img?.distance);
+    if (!Number.isFinite(distance) || distance > STRICT_IMAGE_DISTANCE_THRESHOLD) return false;
+    if (allowedUrls && !allowedUrls.has(img.url)) return false;
+    return true;
+  });
+}
+
+function isScienceTeacher(teacher) {
+  const category = String(teacher?.category || '').toLowerCase();
+  const name = String(teacher?.name || '').toLowerCase();
+  const description = String(teacher?.description || '').toLowerCase();
+  const systemPrompt = String(teacher?.systemPrompt || '').toLowerCase();
+  return [category, name, description, systemPrompt].some((value) => value.includes('science'));
+}
+
+async function generateScienceSlideImage({ topic, slideTitle, slideContent, teacherName }) {
+  if (!ENV.OPENAI_API_KEY) return null;
+
+  const prompt = [
+    `Create a clean educational science illustration for a classroom slide.`,
+    `Topic: ${topic}.`,
+    `Slide title: ${slideTitle}.`,
+    `Teacher: ${teacherName || 'Science teacher'}.`,
+    `Use the following slide content as context: ${cleanTextForEmbedding(slideContent).slice(0, 1800)}`,
+    `Requirements: keep it scientifically relevant, diagram-like when possible, no decorative unrelated anatomy, no text labels unless essential, no watermark, portrait-free.`
+  ].join(' ');
+
+  try {
+    const response = await client.images.generate({
+      model: 'gpt-image-1',
+      prompt,
+      size: '1024x1024',
+    });
+
+    const imageData = response?.data?.[0];
+    const b64 = imageData?.b64_json;
+    if (!b64) return null;
+
+    const buffer = Buffer.from(b64, 'base64');
+    const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'generated-images');
+    await fs.mkdir(uploadsDir, { recursive: true });
+
+    const filename = `${Date.now()}-${randomUUID()}.png`;
+    const filePath = path.join(uploadsDir, filename);
+    await fs.writeFile(filePath, buffer);
+
+    return {
+      id: `generated-${filename}`,
+      source: 'OPENAI',
+      url: `/api/v1/uploads/generated-images/${filename}`,
+      description: `${slideTitle} illustration`,
+      tags: tokenize(`${topic} ${slideTitle}`),
+      _tokenSet: new Set(tokenize(`${topic} ${slideTitle}`)),
+    };
+  } catch (err) {
+    console.error('[Image Generation] Failed to generate science fallback image:', err?.message || err);
+    return null;
+  }
+}
+
+async function isSlideImageRelevant(image, slideText, topicTokens, { strict = false } = {}) {
+  if (!image?.url) return false;
+
+  const scoreThreshold = strict ? STRICT_KEYWORD_SCORE : MIN_SLIDE_IMAGE_KEYWORD_SCORE;
+  const keywordScore = scoreImageForSlide(image, tokenize(slideText));
+  const topicScore = scoreImageForSlide(image, topicTokens);
+  if (Math.max(keywordScore, topicScore) >= scoreThreshold) return true;
+
+  const vectorCandidates = await getStrictSlideVectorCandidates(slideText, new Set([image.url]), 1);
+  return vectorCandidates.some((candidate) => candidate.url === image.url);
 }
 
 async function generateSlideAudio(title, content, voiceId = DEFAULT_VOICE_ID) {
@@ -390,6 +492,8 @@ function resolveTeacherCoursePolicy(teacher, documentId) {
     requireDocumentContext: true,
     allowGeneralKnowledge: false,
     imageMode: 'document',
+    allowAIGeneratedImageFallback: isScienceTeacher(teacher),
+    restrictUploadedLibraryImages: isScienceTeacher(teacher),
   };
 }
 
@@ -633,10 +737,10 @@ INSTRUCTION: Strictly use ONLY the provided "SOURCE MATERIAL" for factual conten
   }
 
   if (teacherPolicy.imageMode === 'document') {
-    const uploadedImageFallback = await getRelevantUploadedImages(topic, docContext, 10);
-    const combinedImages = [...documentImages, ...uploadedImageFallback].filter(
-      (img, index, arr) => arr.findIndex((candidate) => candidate.url === img.url) === index
-    );
+    const uploadedImageFallback = teacherPolicy.restrictUploadedLibraryImages
+      ? []
+      : await getRelevantUploadedImages(topic, docContext, 10);
+    const combinedImages = dedupeImagesByUrl([...documentImages, ...uploadedImageFallback]);
 
     imageIndex = buildImageIndex(combinedImages);
 
@@ -713,7 +817,7 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
     const result = JSON.parse(raw);
 
     // ── Step 2: Ensure each slide has at least one relevant image ──────────
-    if (imageIndex.length > 0) {
+    if (imageIndex.length > 0 || teacherPolicy.allowAIGeneratedImageFallback) {
       const usedImageIds = new Set();
       const usedImageUrls = new Set();
       const topicTokens = tokenize(topic);
@@ -726,22 +830,29 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
         const sanitized = sanitizeSlideImages(normalizedContent, allowedUrls);
         const existingAllowed = [...new Set(sanitized.allowedUrls || [])];
         const approvedExisting = [];
+        const slideText = cleanTextForEmbedding(`${slide.title} ${sanitized.content} ${topic}`);
 
         for (const url of existingAllowed) {
           if (usedImageUrls.has(url)) continue;
           if (approvedExisting.length >= 2) break;
+          const img = urlToImage.get(url);
+          if (!img) continue;
+          const isRelevant = await isSlideImageRelevant(img, slideText, topicTokens, {
+            strict: teacherPolicy.restrictUploadedLibraryImages,
+          });
+          if (!isRelevant) continue;
           approvedExisting.push(url);
           usedImageUrls.add(url);
-          const img = urlToImage.get(url);
           if (img?.id) usedImageIds.add(img.id);
         }
 
         const needAdditional = approvedExisting.length < 2;
-        const slideText = cleanTextForEmbedding(`${slide.title} ${sanitized.content} ${topic}`);
         let selectedImages = [];
 
         // Prefer vector similarity when embeddings exist
-        const vectorCandidates = [];
+        const vectorCandidates = teacherPolicy.restrictUploadedLibraryImages
+          ? []
+          : await getSlideVectorCandidates(slideText, SLIDE_IMAGE_VECTOR_LIMIT);
         const vectorMatches = vectorCandidates
           .filter((c) => Number(c?.distance) <= IMAGE_DISTANCE_THRESHOLD)
           .filter((c) => !approvedExisting.includes(c.url))
@@ -782,13 +893,43 @@ CRITICAL INSTRUCTION: Do NOT include numbers in the slide titles (e.g., use 'Wav
                 topicBestScore = score;
               }
             }
-            keywordBest = topicBest || keywordBest;
+            if (topicBest) {
+              keywordBest = topicBest;
+              bestScore = topicBestScore;
+            }
           }
 
-          if (keywordBest && !approvedExisting.includes(keywordBest.url) && !usedImageUrls.has(keywordBest.url)) {
+          if (
+            keywordBest &&
+            bestScore >= (teacherPolicy.restrictUploadedLibraryImages ? STRICT_KEYWORD_SCORE : MIN_SLIDE_IMAGE_KEYWORD_SCORE) &&
+            !approvedExisting.includes(keywordBest.url) &&
+            !usedImageUrls.has(keywordBest.url)
+          ) {
             selectedImages.push(keywordBest);
             usedImageIds.add(keywordBest.id);
             usedImageUrls.add(keywordBest.url);
+          }
+        }
+
+        if (
+          selectedImages.length === 0 &&
+          approvedExisting.length === 0 &&
+          teacherPolicy.allowAIGeneratedImageFallback
+        ) {
+          const generatedImage = await generateScienceSlideImage({
+            topic,
+            slideTitle: slide.title,
+            slideContent: sanitized.content,
+            teacherName: teacher?.name,
+          });
+
+          if (generatedImage) {
+            imageIndex.push(generatedImage);
+            allowedUrls.add(generatedImage.url);
+            urlToImage.set(generatedImage.url, generatedImage);
+            selectedImages.push(generatedImage);
+            usedImageIds.add(generatedImage.id);
+            usedImageUrls.add(generatedImage.url);
           }
         }
 
